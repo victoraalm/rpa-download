@@ -4,6 +4,47 @@ Todas as mudanças relevantes deste projeto são documentadas aqui.
 O formato segue, de forma simplificada, o [Keep a Changelog](https://keepachangelog.com/pt-BR/)
 e o versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.10.0] - 2026-08-21
+
+### Adicionado (telemetria de fragilidade)
+
+- O executor já tentava vários candidatos de seletor por passo, mas descartava
+  qual deles funcionou. Agora registra o candidato vencedor (posição, tipo e
+  valor), quantas tentativas gastou e quanto tempo levou.
+- Tabelas `executions` e `step_runs` guardam o histórico por execução — antes
+  cada execução esquecia tudo o que aprendeu e nada podia ser medido ao longo
+  do tempo.
+- `app/health.py` traduz esse histórico em aviso: um passo que vem caindo para
+  a reserva em execuções seguidas já mudou de comportamento, mesmo continuando
+  verde. Só sinaliza quando a degradação se repete na janela inteira — queda
+  isolada costuma ser rede ou pop-up, e alarme falso ensina a ignorar o aviso.
+
+### Adicionado (gravação em planilha)
+
+- `app/spreadsheet.py`: leva o arquivo baixado para a planilha de destino, com
+  detecção de planilha aberta, backup com retenção, conferência de cabeçalho,
+  redimensionamento da Tabela do Excel e conversão de número em texto pt-BR
+  (`-1.506,61`) para número de verdade.
+- `RobotManifest.planilhas` descreve as transferências. Vazio (padrão) mantém o
+  comportamento de sempre: o robô só baixa. Manifestos antigos carregam sem
+  alteração.
+
+### Corrigido
+
+- O log por passo gravava sempre `selectors[0]`, mesmo quando quem funcionou
+  era o terceiro candidato — ou seja, informava o seletor errado justamente nas
+  execuções em que a informação importava.
+- O `.venv` do repositório apontava para um Python que não existe nesta
+  máquina; recriado com o 3.13.
+
+### Notas
+
+- Novas dependências: `openpyxl` e `pywin32`, ambas com import preguiçoso —
+  quem não usa transferência para planilha não precisa delas.
+- Em repositório dentro do OneDrive, o git exige
+  `git config windows.appendAtomically false` (a sincronização quebra a escrita
+  atômica do reflog).
+
 ## [1.9.2] - 2026-06-29
 
 ### Corrigido (login SSO sendo repetido)
