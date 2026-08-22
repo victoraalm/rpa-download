@@ -4,4 +4,4 @@ Fase 1 (Fundação): espelhamento de pastas, banco SQLite, fila de retry e dashb
 PySide6 com temas claro e escuro.
 """
 
-__version__ = "1.9.2"
+__version__ = "1.10.0"
