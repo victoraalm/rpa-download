@@ -228,7 +228,9 @@ def _write_csv(log_path, rows):
     if not log_path:
         return
     csv_path = (log_path[:-4] + ".csv") if log_path.lower().endswith(".log") else log_path + ".csv"
-    cols = ["data_hora", "periodo", "passo", "acao", "campo", "seletor", "valor", "status", "erro"]
+    cols = ["data_hora", "periodo", "passo", "acao", "campo", "seletor",
+            "seletor_tipo", "seletor_rank", "seletor_total", "tentativas",
+            "duracao_ms", "valor", "status", "erro"]
     try:
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=cols, delimiter=";", extrasaction="ignore")

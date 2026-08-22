@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time as _time
 from datetime import datetime
 
 from PySide6.QtCore import QObject, QProcess, Signal
@@ -114,7 +115,15 @@ class ExecutionController(QObject):
         proc.finished.connect(self._on_finished)
         proc.errorOccurred.connect(self._on_error)
 
-        self._ctx = {"robot_id": robot_id, "name": robot.name, "tmp": tmp}
+        # Abre a execucao no banco ANTES de disparar o processo: se o executor
+        # morrer, a execucao fica registrada como erro em vez de sumir.
+        try:
+            exec_id = self.db.start_execution(robot_id, robot.name, "manual")
+        except Exception:  # noqa: BLE001 - historico nunca derruba a execucao
+            exec_id = None
+        self._ctx = {"robot_id": robot_id, "name": robot.name, "tmp": tmp,
+                     "exec_id": exec_id, "log_path": log_path,
+                     "t0": _time.monotonic()}
         self._buf = ""
         self._cancelled = False
         self.proc = proc
@@ -195,6 +204,11 @@ class ExecutionController(QObject):
             self.statusMessage.emit(obj.get("msg", ""))
         elif t == "login_required":
             self.statusMessage.emit("Sessão expirada — faça login na janela do navegador que abriu…")
+        elif t == "done" and self._ctx is not None:
+            # O executor ja conta os downloads e descreve o erro. Guardar aqui
+            # evita adivinhar depois olhando pastas.
+            self._ctx["downloads"] = len(obj.get("downloads") or [])
+            self._ctx["error"] = obj.get("error", "") or ""
 
     def _on_error(self, error):
         if self.proc is None:
@@ -204,6 +218,7 @@ class ExecutionController(QObject):
             self._reset()
             self.statusMessage.emit("Não foi possível iniciar o executor.")
             if ctx:
+                self._persistir(ctx, "erro", "o executor nao pode ser iniciado")
                 self._cleanup(ctx)
                 self.executionFinished.emit(ctx["robot_id"], False)
 
@@ -223,8 +238,48 @@ class ExecutionController(QObject):
         else:
             self.statusMessage.emit(
                 f"Robô “{ctx['name']}” terminou com erro (ver log em runs/).")
+        if cancelled:
+            status = "interrompido"
+        elif code == 0:
+            status = "ok"
+        else:
+            status = "erro"
+        self._persistir(ctx, status)
         self._cleanup(ctx)
         self.executionFinished.emit(ctx["robot_id"], code == 0 and not cancelled)
+
+    # --------------------------------------------------------- historico
+    def _persistir(self, ctx, status: str, erro: str = "") -> None:
+        """Grava a execucao e os passos no banco.
+
+        Le o .csv que o executor ja escreve — assim a telemetria chega ao
+        historico sem mudar o protocolo entre os processos. Falhar aqui nunca
+        pode derrubar a execucao: o historico e util, nao essencial.
+        """
+        exec_id = (ctx or {}).get("exec_id")
+        if not exec_id:
+            return
+        linhas = []
+        try:
+            log_path = ctx.get("log_path") or ""
+            csv_path = (log_path[:-4] + ".csv") if log_path.lower().endswith(".log") \
+                else log_path + ".csv"
+            if os.path.isfile(csv_path):
+                import csv as _csv
+                with open(csv_path, newline="", encoding="utf-8-sig") as f:
+                    linhas = list(_csv.DictReader(f, delimiter=";"))
+        except Exception:  # noqa: BLE001
+            linhas = []
+        baixados = int(ctx.get("downloads", 0) or 0)
+        erro = erro or str(ctx.get("error", "") or "")
+        dur = int((_time.monotonic() - ctx.get("t0", _time.monotonic())) * 1000)
+        try:
+            self.db.add_step_runs(exec_id, linhas)
+            self.db.finish_execution(exec_id, status, error=erro,
+                                     downloads=baixados, duration_ms=dur)
+            self.db.prune_executions(ctx["robot_id"], manter=100)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------ helpers
     def _reset(self):

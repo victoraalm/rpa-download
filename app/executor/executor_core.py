@@ -134,6 +134,11 @@ class ExecutionEngine:
         # Resultado passo a passo (para o log .csv) e o período atual (particionamento).
         self.step_results: list = []
         self._current_period = ""
+        # Telemetria de fragilidade: guarda QUAL candidato de seletor de fato
+        # funcionou. Sem isso a informacao mais util do log e jogada fora.
+        self._last_match: dict | None = None
+        self._attempts_used = 0
+        self._step_t0 = 0.0
         # Escuta global de downloads: qualquer arquivo baixado durante a execução
         # é salvo, sem depender de um "marcador" após o clique.
         self._downloads_captured: list = []
@@ -160,6 +165,11 @@ class ExecutionEngine:
         while i < len(steps):
             step = steps[i]
             rec_index = i
+            # Zera antes de cada passo: sem isso um passo sem seletor herdaria
+            # o candidato que funcionou no passo anterior.
+            self._last_match = None
+            self._attempts_used = 0
+            self._step_t0 = time.monotonic()
             # Passos em página de login são ignorados (login é tratado pela sessão
             # e pelo fallback de login manual).
             if step.action != "goto" and self._on_auth_page():
@@ -262,13 +272,22 @@ class ExecutionEngine:
         return saved
 
     def _record(self, index, step, status, error="", overrides=None):
+        m = self._last_match or {}
+        dur = int((time.monotonic() - self._step_t0) * 1000) if self._step_t0 else 0
         self.step_results.append({
             "data_hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "periodo": self._current_period,
             "passo": index,
             "acao": step.action,
             "campo": step.name or step.label or step.url or "",
-            "seletor": step.selectors[0].value if step.selectors else "",
+            # O seletor REALMENTE usado -- antes daqui saia sempre o primeiro da
+            # lista, mesmo quando quem funcionou foi o terceiro candidato.
+            "seletor": m.get("value") or (step.selectors[0].value if step.selectors else ""),
+            "seletor_tipo": m.get("type", ""),
+            "seletor_rank": m.get("rank", -1),
+            "seletor_total": m.get("total", len(step.selectors or [])),
+            "tentativas": self._attempts_used,
+            "duracao_ms": dur,
             "valor": self._value_for(step, overrides, index) if step.field else step.value,
             "status": status,
             "erro": error,
@@ -366,6 +385,7 @@ class ExecutionEngine:
         last = None
         for k in range(self.max_attempts):
             try:
+                self._attempts_used += 1
                 return fn()
             except (PWError, PWTimeout) as e:
                 last = e
@@ -382,13 +402,23 @@ class ExecutionEngine:
         if not step.selectors:
             raise ExecutionError(f"{what}: passo sem seletores")
         last = None
-        for sel in step.selectors:
+        total = len(step.selectors)
+        for rank, sel in enumerate(step.selectors):
             loc = self._locator(sel)
             try:
-                return self._attempt(lambda l=loc: do(l), f"{what} [{sel.type}]")
+                out = self._attempt(lambda l=loc: do(l), f"{what} [{sel.type}]")
             except ExecutionError as e:
                 last = e
                 self.log(f"  seletor {sel.type} esgotado; tentando próximo…")
+                continue
+            # rank 0 = candidato principal. Acima disso o alvo original mudou e
+            # o robo so esta vivo pela reserva -- e o sinal de fragilidade.
+            self._last_match = {"rank": rank, "total": total,
+                                "type": sel.type, "value": sel.value}
+            if rank > 0:
+                self.log(f"  ATENCAO: funcionou no candidato {rank + 1}/{total} "
+                         f"({sel.type}) — o alvo principal pode ter mudado")
+            return out
         raise last or ExecutionError(f"{what}: nenhum seletor funcionou")
 
     def _goto(self, step):

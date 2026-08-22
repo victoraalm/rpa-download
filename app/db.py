@@ -16,6 +16,15 @@ from datetime import datetime
 
 from .models import Block, Robot, Screen
 
+
+def _int(v, padrao=0):
+    """int() tolerante: o CSV do executor entrega tudo como texto, e campo
+    vazio e comum em passos que nao usam seletor."""
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return padrao
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -63,6 +72,44 @@ CREATE TABLE IF NOT EXISTS pending_ops (
     last_error TEXT DEFAULT '',
     created_at TEXT NOT NULL
 );
+
+-- Historico de execucao. Sem estas duas tabelas nao ha como medir nada ao
+-- longo do tempo: cada execucao esquecia tudo o que aprendeu.
+CREATE TABLE IF NOT EXISTS executions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    robot_id    INTEGER,
+    robot_name  TEXT NOT NULL DEFAULT '',
+    started_at  TEXT NOT NULL,
+    finished_at TEXT DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'rodando',  -- rodando | ok | erro | interrompido
+    origin      TEXT NOT NULL DEFAULT 'manual',   -- manual | agendado
+    error       TEXT DEFAULT '',
+    downloads   INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS step_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id INTEGER NOT NULL,
+    step_index   INTEGER NOT NULL,
+    action       TEXT NOT NULL DEFAULT '',
+    label        TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT '',
+    error        TEXT DEFAULT '',
+    duration_ms  INTEGER NOT NULL DEFAULT 0,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    -- Telemetria de fragilidade: sel_rank 0 = candidato principal funcionou;
+    -- maior que 0 = o alvo original mudou e o passo vive de reserva; -1 = n/a.
+    sel_rank     INTEGER NOT NULL DEFAULT -1,
+    sel_total    INTEGER NOT NULL DEFAULT 0,
+    sel_type     TEXT DEFAULT '',
+    sel_value    TEXT DEFAULT '',
+    FOREIGN KEY (execution_id) REFERENCES executions (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_step_runs_exec  ON step_runs (execution_id);
+CREATE INDEX IF NOT EXISTS ix_step_runs_index ON step_runs (execution_id, step_index);
+CREATE INDEX IF NOT EXISTS ix_exec_robot      ON executions (robot_id, id DESC);
 """
 
 
@@ -104,6 +151,90 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+    # ------------------------------------------------------- execucoes
+    def start_execution(self, robot_id, robot_name: str, origin: str = "manual") -> int:
+        """Abre uma execucao e devolve o id. Fechar com finish_execution()."""
+        with self.conn() as c:
+            cur = c.execute(
+                "INSERT INTO executions (robot_id, robot_name, started_at, status, origin) "
+                "VALUES (?, ?, ?, 'rodando', ?)",
+                (robot_id, robot_name, datetime.now().isoformat(timespec="seconds"), origin),
+            )
+            return int(cur.lastrowid)
+
+    def finish_execution(self, execution_id: int, status: str, *, error: str = "",
+                         downloads: int = 0, duration_ms: int = 0) -> None:
+        with self.conn() as c:
+            c.execute(
+                "UPDATE executions SET finished_at = ?, status = ?, error = ?, "
+                "downloads = ?, duration_ms = ? WHERE id = ?",
+                (datetime.now().isoformat(timespec="seconds"), status, error,
+                 downloads, duration_ms, execution_id),
+            )
+
+    def add_step_runs(self, execution_id: int, rows: list[dict]) -> int:
+        """Persiste o resultado passo a passo vindo do executor.
+
+        Aceita as chaves do step_results do ExecutionEngine. Campos ausentes
+        viram o padrao, para que manifestos antigos continuem gravando.
+        """
+        if not rows:
+            return 0
+        dados = [
+            (execution_id,
+             _int(r.get("passo"), -1),
+             str(r.get("acao", "")),
+             str(r.get("campo", "")),
+             str(r.get("status", "")),
+             str(r.get("erro", "")),
+             _int(r.get("duracao_ms"), 0),
+             _int(r.get("tentativas"), 0),
+             _int(r.get("seletor_rank"), -1),
+             _int(r.get("seletor_total"), 0),
+             str(r.get("seletor_tipo", "")),
+             str(r.get("seletor", "")))
+            for r in rows
+        ]
+        with self.conn() as c:
+            c.executemany(
+                "INSERT INTO step_runs (execution_id, step_index, action, label, status,"
+                " error, duration_ms, attempts, sel_rank, sel_total, sel_type, sel_value)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                dados,
+            )
+        return len(dados)
+
+    def list_executions(self, robot_id=None, limit: int = 50) -> list[dict]:
+        if robot_id is None:
+            rows = self.conn().execute(
+                "SELECT * FROM executions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        else:
+            rows = self.conn().execute(
+                "SELECT * FROM executions WHERE robot_id = ? ORDER BY id DESC LIMIT ?",
+                (robot_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def recent_step_runs(self, robot_id: int, execucoes: int = 10) -> list[dict]:
+        """Passos das N execucoes mais recentes do robo, da mais nova para a mais antiga."""
+        rows = self.conn().execute(
+            "SELECT sr.*, e.id AS exec_id, e.started_at FROM step_runs sr "
+            "JOIN executions e ON e.id = sr.execution_id "
+            "WHERE e.robot_id = ? AND e.status <> 'rodando' "
+            "AND e.id IN (SELECT id FROM executions WHERE robot_id = ? "
+            "             AND status <> 'rodando' ORDER BY id DESC LIMIT ?) "
+            "ORDER BY e.id DESC, sr.step_index ASC",
+            (robot_id, robot_id, execucoes)).fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_executions(self, robot_id: int, manter: int = 100) -> int:
+        """Mantem so as N execucoes mais recentes do robo (o resto cai em cascata)."""
+        with self.conn() as c:
+            cur = c.execute(
+                "DELETE FROM executions WHERE robot_id = ? AND id NOT IN "
+                "(SELECT id FROM executions WHERE robot_id = ? ORDER BY id DESC LIMIT ?)",
+                (robot_id, robot_id, manter))
+            return cur.rowcount or 0
+
 
     # ---------------------------------------------------------------- screens
     def list_screens(self) -> list[Screen]:
