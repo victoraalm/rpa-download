@@ -92,6 +92,13 @@ class MainWindow(QMainWindow):
         self.headed_check.toggled.connect(config.set_execution_headed)
         layout.addWidget(self.headed_check)
 
+        self.health_btn = QPushButton("🩺  Saúde")
+        self.health_btn.setToolTip(
+            "Mostra os robôs que estão funcionando pela alternativa de reserva "
+            "— ou seja, que mudaram de comportamento e ainda não quebraram.")
+        self.health_btn.clicked.connect(self.open_health)
+        layout.addWidget(self.health_btn)
+
         self.guide_btn = QPushButton("📖  Guia")
         self.guide_btn.setToolTip("Abrir o guia passo a passo de como usar")
         self.guide_btn.clicked.connect(self.open_guide)
@@ -109,6 +116,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.theme_btn)
 
         return bar
+
+    def open_health(self) -> None:
+        """Abre o painel de saúde dos robôs."""
+        from .health_panel import open_health_panel
+        open_health_panel(self.db, self)
 
     def open_guide(self) -> None:
         from .guide import GuideDialog
