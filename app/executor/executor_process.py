@@ -205,6 +205,13 @@ def main(argv=None) -> int:
 
             if status == "ok":
                 rc = EXIT_OK
+                # Baixar e so metade: o dado vira indicador quando entra na
+                # planilha. Uma falha aqui derruba o rc, mas nunca apaga os
+                # arquivos que ja foram baixados com sucesso.
+                if getattr(manifest, "planilhas", None):
+                    if not _gravar_planilhas(manifest, args.download_dir, log):
+                        rc = EXIT_ERROR
+                        error = "Downloads OK, mas a gravação na planilha falhou."
             elif status == "cancel":
                 rc = EXIT_CANCEL
             else:
@@ -221,6 +228,24 @@ def main(argv=None) -> int:
 
     _emit({"type": "done", "ok": rc == EXIT_OK, "downloads": downloads, "error": error})
     return rc
+
+
+def _gravar_planilhas(manifest, download_dir, log) -> bool:
+    """Leva os arquivos baixados para as planilhas de destino do robô."""
+    try:
+        from ..spreadsheet import gravar_todas
+    except Exception as e:  # noqa: BLE001 - dependência opcional
+        log(f"ERRO: não consegui carregar o módulo de planilha: {e}")
+        return False
+    log(f"Gravando em {len(manifest.planilhas)} planilha(s)…")
+    resultados = gravar_todas(manifest.planilhas, download_dir, log=log)
+    falhas = [r for r in resultados if not r.ok]
+    for r in resultados:
+        if r.ok and r.linhas:
+            log(f"  {r.linhas} linha(s) x {r.colunas} coluna(s) gravadas")
+    if falhas:
+        log(f"{len(falhas)} transferência(s) falharam.")
+    return not falhas
 
 
 def _write_csv(log_path, rows):

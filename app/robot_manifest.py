@@ -134,6 +134,9 @@ class RobotManifest:
     download_mode: str = "accumulate"  # accumulate (data/hora no nome) | overwrite
     site_limit: SiteLimit = field(default_factory=SiteLimit)
     steps: list[Step] = field(default_factory=list)
+    # Transferências para planilha, executadas DEPOIS que os downloads saem.
+    # Lista vazia = robô só baixa, que é o comportamento de sempre.
+    planilhas: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -151,6 +154,7 @@ class RobotManifest:
             download_mode=d.get("download_mode", "accumulate"),
             site_limit=SiteLimit.from_dict(d.get("site_limit")),
             steps=[Step.from_dict(s) for s in d.get("steps", [])],
+            planilhas=list(d.get("planilhas") or []),
         )
 
     def save(self, path: str) -> None:
